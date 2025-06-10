@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 NUM_JOINTS = 20
 NUM_ACTOR_INPUTS = 67  # 20 + 20 + 3 + 4 + 20 (joint_pos + joint_vel + grav + wc_ohe + mean_bias)
-NUM_CRITIC_INPUTS = 356  # 476 + 4 + 20 (original + wc_ohe + mean_bias)
+NUM_CRITIC_INPUTS = 500  # 476 + 4 + 20 (original + wc_ohe + mean_bias)
 
 
 def get_servo_deadband() -> tuple[float, float]:
@@ -174,6 +174,11 @@ class Actor(eqx.Module):
 
         # Softplus and clip to ensure positive standard deviations.
         std_nm = jnp.clip((jax.nn.softplus(std_nm) + self.min_std) * self.var_scale, max=self.max_std)
+
+        # Add reference pose as bias to mixture means
+        # obs_n structure: [joint_pos_n, joint_vel_n, proj_grav_3, wc_ohe, mean_bias_n]
+        ref_pose = obs_n[..., -self.num_outputs:]     # shape (..., NUM_JOINTS)
+        mean_nm = mean_nm + ref_pose[..., None]       # broadcast to (..., NUM_JOINTS, num_mixtures)
 
         # Comment out because we now sample deltas not absolute positions
         # mean_nm = mean_nm + jnp.array([v for _, v in ZEROS])[:, None]
@@ -576,7 +581,7 @@ class WalkingCommand(ksim.Command):
 @attrs.define(frozen=True, kw_only=True)
 class WalkingReward(ksim.Reward):
     """Track COM velocity & joint pose against the reference clip."""
-    lin_speed: float = 1.169   # tweak for ZBot if necessary
+    lin_speed: float = 0.3   # tweak for ZBot if necessary
 
     def get_reward(self, traj: ksim.Trajectory) -> Array:
         wc   = traj.command["walking_command"]
@@ -592,7 +597,7 @@ class WalkingReward(ksim.Reward):
         v_pen    = jnp.square(lin_x[..., None] - target_v)
 
         # joint position penalty
-        q_pen = xax.get_norm(traj.qpos[..., 7:] - ref, "l2")
+        q_pen = xax.get_norm(traj.qpos[..., 7:] - ref, "l2").sum(-1)
 
         vel_pen = (v_pen * ohe).sum(-1)
         return -0.2 * vel_pen - 0.01 * q_pen
