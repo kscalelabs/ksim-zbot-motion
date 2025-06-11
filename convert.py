@@ -11,7 +11,7 @@ from kinfer.export.jax import export_fn
 from kinfer.export.serialize import pack
 from kinfer.rust_bindings import PyModelMetadata
 
-from train import HumanoidWalkingTask, Model
+from train import Model, ZbotWalkingTask
 
 
 def main() -> None:
@@ -23,7 +23,7 @@ def main() -> None:
     if not (ckpt_path := Path(args.checkpoint_path)).exists():
         raise FileNotFoundError(f"Checkpoint path {ckpt_path} does not exist")
 
-    task: HumanoidWalkingTask = HumanoidWalkingTask.load_task(ckpt_path)
+    task: ZbotWalkingTask = ZbotWalkingTask.load_task(ckpt_path)
     model: Model = task.load_ckpt(ckpt_path, part="model")[0]
 
     # Loads the Mujoco model and gets the joint names.
