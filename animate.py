@@ -3,6 +3,7 @@
 
 import asyncio
 from pathlib import Path
+from typing import Literal
 
 import jax.numpy as jnp
 import ksim
@@ -21,12 +22,43 @@ from train import (
 MJCF_PATH = asyncio.run(ksim.get_mujoco_model_path("zbot", name="robot"))
 ANIM_PATHS = [Path("gaits/stand.json"), Path("gaits/stand_to_step.json")]
 LOOP = False
-INTERP = "cubic"
+INTERP: Literal["linear", "cubic"] = "cubic"
 
 
 def load_trajectory(dt: float) -> jnp.ndarray:
     clips = [MjAnim.load(p).to_numpy(dt, interp=INTERP, loop=False) for p in ANIM_PATHS]
     return jnp.concatenate(clips, axis=0)
+
+
+class ZbotAnimateTask(ZbotWalkingTask):
+    """Task that plays back animation clips instead of using a trained model."""
+
+    def __init__(self, config: ZbotWalkingTaskConfig) -> None:
+        super().__init__(config)
+        self.trajectory = load_trajectory(config.ctrl_dt)
+        self.T = self.trajectory.shape[0]
+        self.zeros_j = jnp.array([angle for _, angle in ZEROS])
+
+    def sample_action(
+        self,
+        model: Model,
+        model_carry: tuple[Array, Array],
+        physics_model: ksim.PhysicsModel,
+        physics_state: ksim.PhysicsState,
+        observations: xax.FrozenDict[str, Array],
+        commands: xax.FrozenDict[str, Array],
+        rng: PRNGKeyArray,
+        argmax: bool,
+    ) -> ksim.Action:
+        if physics_state.data.time < 1e-9:
+            physics_state.data.qpos[7:] = self.zeros_j
+            physics_state.data.qvel[:] = 0.0  # start at rest
+            mujoco.mj_forward(physics_model, physics_state.data)
+
+        step = int(jnp.round(physics_state.data.time / self.config.ctrl_dt))
+        frame = self.trajectory[step % self.T] if LOOP else self.trajectory[min(step, self.T - 1)]
+        joint_positions = frame[7:]
+        return ksim.Action(action=joint_positions, carry=model_carry)
 
 
 if __name__ == "__main__":
@@ -43,34 +75,5 @@ if __name__ == "__main__":
         render_reflection=False,
         live_reward_buffer_size=4,
     )
-    task = ZbotWalkingTask(cfg)
-
-    trajectory = load_trajectory(cfg.ctrl_dt)
-    T = trajectory.shape[0]
-
-    # Get the starting pose directly from train.py
-    ZEROS_J = jnp.array([angle for _, angle in ZEROS])
-
-    def constant_clip_sample_action(
-        self: ZbotWalkingTask,
-        model: Model,
-        model_carry: tuple[Array, Array],
-        physics_model: ksim.PhysicsModel,
-        physics_state: ksim.PhysicsState,
-        observations: xax.FrozenDict[str, Array],
-        commands: xax.FrozenDict[str, Array],
-        rng: PRNGKeyArray,
-        argmax: bool,
-    ) -> ksim.Action:
-        if physics_state.data.time < 1e-9:
-            physics_state.data.qpos[7:] = ZEROS_J
-            physics_state.data.qvel[:] = 0.0  # start at rest
-            mujoco.mj_forward(physics_model, physics_state.data)
-
-        step = int(jnp.round(physics_state.data.time / cfg.ctrl_dt))
-        frame = trajectory[step % T] if LOOP else trajectory[min(step, T - 1)]
-        joint_positions = frame[7:]
-        return ksim.Action(action=joint_positions, carry=model_carry)
-
-    task.sample_action = constant_clip_sample_action.__get__(task, ZbotWalkingTask)
+    task = ZbotAnimateTask(cfg)
     task.run_model_viewer(argmax_action=True)
