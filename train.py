@@ -5,25 +5,25 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self, TypedDict, Literal
+from typing import Literal, Self, TypedDict
 
 import attrs
 import distrax
 import equinox as eqx
 import jax
-import jax.numpy as jnp
 import jax.nn as jnn
+import jax.numpy as jnp
 import ksim
 import mujoco
 import mujoco_scenes
 import mujoco_scenes.mjcf
-from mujoco_animator import MjAnim
 import optax
 import xax
 from jaxtyping import Array, PRNGKeyArray
 from ksim.actuators import NoiseType, StatefulActuators
 from ksim.types import Metadata, PhysicsData
 from ksim.utils.mujoco import get_ctrl_data_idx_by_name
+from mujoco_animator import MjAnim
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +177,8 @@ class Actor(eqx.Module):
 
         # Add reference pose as bias to mixture means
         # obs_n structure: [joint_pos_n, joint_vel_n, proj_grav_3, wc_ohe, mean_bias_n]
-        ref_pose = obs_n[..., -self.num_outputs:]     # shape (..., NUM_JOINTS)
-        mean_nm = mean_nm + ref_pose[..., None]       # broadcast to (..., NUM_JOINTS, num_mixtures)
+        ref_pose = obs_n[..., -self.num_outputs :]  # shape (..., NUM_JOINTS)
+        mean_nm = mean_nm + ref_pose[..., None]  # broadcast to (..., NUM_JOINTS, num_mixtures)
 
         # Comment out because we now sample deltas not absolute positions
         # mean_nm = mean_nm + jnp.array([v for _, v in ZEROS])[:, None]
@@ -523,22 +523,24 @@ class WalkingCommand(ksim.Command):
 
     @classmethod
     def create(cls, dt: float, interp: Literal["linear", "cubic"] = "linear") -> Self:
-        root = Path(__file__).parent / "gaits"     # stand.mjanim, walk.mjanim …
-        stand     = MjAnim.load(root / "stand.json").to_numpy(dt, interp=interp)
-        walk      = MjAnim.load(root / "walk.json").to_numpy(dt,  interp=interp)
-        s2w       = MjAnim.load(root / "stand_to_walk.json").to_numpy(dt,  interp=interp)
-        w2s       = MjAnim.load(root / "walk_to_stand.json").to_numpy(dt,  interp=interp)
+        root = Path(__file__).parent / "gaits"  # stand.mjanim, walk.mjanim …
+        stand = MjAnim.load(root / "stand.json").to_numpy(dt, interp=interp)
+        walk = MjAnim.load(root / "walk.json").to_numpy(dt, interp=interp)
+        s2w = MjAnim.load(root / "stand_to_walk.json").to_numpy(dt, interp=interp)
+        w2s = MjAnim.load(root / "walk_to_stand.json").to_numpy(dt, interp=interp)
 
         lengths = jnp.array([len(stand), len(walk), len(s2w), len(w2s)], dtype=jnp.int32)
-        starts  = jnp.concatenate([jnp.zeros(1, jnp.int32), jnp.cumsum(lengths)[:-1]])
+        starts = jnp.concatenate([jnp.zeros(1, jnp.int32), jnp.cumsum(lengths)[:-1]])
 
         #            stand  walk  s2w  w2s
-        transition = jnp.array([
-            [0.85, 0.00, 0.15, 0.00],   # stand –> stand / s2w
-            [0.00, 0.85, 0.00, 0.15],   # walk  –> walk  / w2s
-            [0.00, 1.00, 0.00, 0.00],   # s2w   –> walk
-            [1.00, 0.00, 0.00, 0.00],   # w2s   –> stand
-        ])
+        transition = jnp.array(
+            [
+                [0.85, 0.00, 0.15, 0.00],  # stand –> stand / s2w
+                [0.00, 0.85, 0.00, 0.15],  # walk  –> walk  / w2s
+                [0.00, 1.00, 0.00, 0.00],  # s2w   –> walk
+                [1.00, 0.00, 0.00, 0.00],  # w2s   –> stand
+            ]
+        )
 
         anims = jnp.concatenate([stand, walk, s2w, w2s], axis=0)
 
@@ -557,36 +559,48 @@ class WalkingCommand(ksim.Command):
         pose = self.anims.array[self.starts.array[cmd_id] + cmd_off]
         return jnp.concatenate([ohe, pose])
 
-    def initial_command(self, *_):
-        cmd_id  = jnp.zeros((), jnp.int32)
+    def initial_command(
+        self,
+        physics_data: ksim.PhysicsData,
+        curriculum_level: Array,
+        rng: PRNGKeyArray,
+    ) -> Array:
+        cmd_id = jnp.zeros((), jnp.int32)
         cmd_off = jnp.zeros((), jnp.int32)
-        cmd     = self._get_cmd(cmd_id, cmd_off)
+        cmd = self._get_cmd(cmd_id, cmd_off)
         return jnp.concatenate([cmd_id[None], cmd_off[None], cmd])
 
-    def __call__(self, prev, *_):
-        cmd_id  = prev[0].round().astype(jnp.int32)
-        cmd_off = prev[1].round().astype(jnp.int32) + 1
-        done    = cmd_off >= self.lengths.array[cmd_id]
-        nxt_id  = jax.random.choice(
-            jax.random.PRNGKey(0),    # key is ignored by jit/scan; real key comes in by caller
+    def __call__(
+        self,
+        prev_command: Array,
+        physics_data: ksim.PhysicsData,
+        curriculum_level: Array,
+        rng: PRNGKeyArray,
+    ) -> Array:
+        cmd_id = prev_command[0].round().astype(jnp.int32)
+        cmd_off = prev_command[1].round().astype(jnp.int32) + 1
+        done = cmd_off >= self.lengths.array[cmd_id]
+        nxt_id = jax.random.choice(
+            jax.random.PRNGKey(0),  # key is ignored by jit/scan; real key comes in by caller
             jnp.arange(self.transition_probs.array.shape[0]),
             p=self.transition_probs.array[cmd_id],
         )
-        cmd_id  = jnp.where(done, nxt_id, cmd_id)
-        cmd_off = jnp.where(done, 0,      cmd_off)
-        cmd     = self._get_cmd(cmd_id, cmd_off)
+        cmd_id = jnp.where(done, nxt_id, cmd_id)
+        cmd_off = jnp.where(done, 0, cmd_off)
+        cmd = self._get_cmd(cmd_id, cmd_off)
         return jnp.concatenate([cmd_id[None], cmd_off[None], cmd])
 
 
 @attrs.define(frozen=True, kw_only=True)
 class WalkingReward(ksim.Reward):
     """Track COM velocity & joint pose against the reference clip."""
-    lin_speed: float = 0.3   # tweak for ZBot if necessary
+
+    lin_speed: float = 0.3  # tweak for ZBot if necessary
 
     def get_reward(self, traj: ksim.Trajectory) -> Array:
-        wc   = traj.command["walking_command"]
-        ohe  = wc[..., 2:6]         # 4-state one-hot
-        ref  = wc[...,   -NUM_JOINTS:]   # 20-joint pose
+        wc = traj.command["walking_command"]
+        ohe = wc[..., 2:6]  # 4-state one-hot
+        ref = wc[..., -NUM_JOINTS:]  # 20-joint pose
 
         # world-to-body linear x vel
         lin = xax.rotate_vector_by_quat(traj.qvel[..., :3], traj.qpos[..., 3:7], inverse=True)
@@ -594,7 +608,7 @@ class WalkingReward(ksim.Reward):
 
         # stand | walk | s2w | w2s
         target_v = jnp.array([0.0, self.lin_speed, self.lin_speed, self.lin_speed])
-        v_pen    = jnp.square(lin_x[..., None] - target_v)
+        v_pen = jnp.square(lin_x[..., None] - target_v)
 
         # joint position penalty
         q_pen = xax.get_norm(traj.qpos[..., 7:] - ref, "l2").sum(-1)
@@ -903,7 +917,7 @@ class ZbotWalkingTask(ksim.PPOTask[ZbotWalkingTaskConfig]):
                 joint_pos_n,  # NUM_JOINTS
                 joint_vel_n,  # NUM_JOINTS
                 proj_grav_3,  # 3
-                wc_ohe,       # 4
+                wc_ohe,  # 4
                 mean_bias_n,  # NUM_JOINTS
             ],
             axis=-1,
