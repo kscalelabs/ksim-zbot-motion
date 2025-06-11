@@ -1,5 +1,8 @@
 # requirements.txt
 
+# Rederence motions
+mujoco-animator
+
 # Training dependencies
 ksim==0.1.3
 xax==0.3.0
